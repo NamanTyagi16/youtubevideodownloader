@@ -1,0 +1,5 @@
+node_modules/
+clip-*.mp4
+*.mp4
+.env
+.DS_Store
