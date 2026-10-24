@@ -27,12 +27,12 @@ function cleanYouTubeUrl(rawUrl) {
     return u;
 }
 
-// Uses tv_embedded client which has 0 bot verification or cookie walls on cloud servers
+// The mediaconnect client does not trigger YouTube's datacenter bot challenge or require cookies
 function getBaseOptions() {
     return {
         ffmpegLocation: ffmpegPath,
         noWarnings: true,
-        extractorArgs: 'youtube:player_client=tv_embedded'
+        extractorArgs: 'youtube:player_client=mediaconnect'
     };
 }
 
