@@ -16,13 +16,29 @@ if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
-// Helper to get yt-dlp base options including cookies
+// Write cookies from environment variable if provided (for Render / cloud)
+const envCookies = process.env.YOUTUBE_COOKIES_TEXT;
+const cookiesPath = path.resolve(__dirname, 'cookies.txt');
+if (envCookies && !fs.existsSync(cookiesPath)) {
+    try {
+        fs.writeFileSync(cookiesPath, envCookies, 'utf8');
+        console.log('[Cookies] cookies.txt generated from YOUTUBE_COOKIES_TEXT environment variable.');
+    } catch (e) {
+        console.error('[Cookies] Error writing cookies.txt from env:', e);
+    }
+}
+
+// Helper to get yt-dlp base options
 function getBaseOptions() {
     const opts = {
         ffmpegLocation: ffmpegPath,
-        noWarnings: true
+        noWarnings: true,
+        // Mimic modern real browser client to avoid "bot" restriction
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        referer: 'https://www.youtube.com/',
+        extractorArgs: 'youtube:player_client=android,web'
     };
-    const cookiesPath = path.resolve(__dirname, 'cookies.txt');
+
     if (fs.existsSync(cookiesPath)) {
         opts.cookies = cookiesPath;
     } else if (process.platform === 'win32') {
@@ -34,31 +50,6 @@ function getBaseOptions() {
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', message: 'CreatorScope Engine is running!' });
-});
-
-// Video info preview endpoint (Fast metadata lookup)
-app.get('/api/info', async (req, res) => {
-    try {
-        const { url } = req.query;
-        if (!url) return res.status(400).json({ error: 'URL parameter is required' });
-
-        const info = await youtubedl(url, {
-            ...getBaseOptions(),
-            dumpSingleJson: true,
-            skipDownload: true
-        });
-
-        res.json({
-            title: info.title || 'YouTube Video',
-            duration: info.duration || 0,
-            duration_string: info.duration_string || '',
-            thumbnail: info.thumbnail || '',
-            channel: info.uploader || info.channel || ''
-        });
-    } catch (err) {
-        console.error('Info lookup error:', err.message || err);
-        res.status(500).json({ error: 'Could not fetch video metadata. Verify link or access.' });
-    }
 });
 
 // Single Video Download endpoint
@@ -84,7 +75,7 @@ app.get('/download', async (req, res) => {
         if (isAudio) {
             dlOptions.extractAudio = true;
             dlOptions.audioFormat = 'mp3';
-            dlOptions.audioQuality = 0; // Best quality MP3
+            dlOptions.audioQuality = 0;
         } else {
             if (quality === '1080') {
                 dlOptions.format = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
@@ -98,15 +89,23 @@ app.get('/download', async (req, res) => {
 
         await youtubedl(url, dlOptions);
 
-        res.download(outputPath, `download-${Date.now()}.${fileExt}`, (err) => {
+        res.download(outputPath, `video-${Date.now()}.${fileExt}`, (err) => {
             if (err) console.error('Error sending file:', err);
             cleanupFile(outputPath);
         });
 
     } catch (error) {
-        console.error('Download error:', error);
+        console.error('Download error details:', error.stderr || error.message || error);
         cleanupFile(outputPath);
-        res.status(500).json({ error: 'Error downloading video. Please check URL or restrictions.' });
+        
+        const rawErr = String(error.stderr || error.message || '');
+        let userMessage = 'Error downloading video.';
+        if (rawErr.includes('Sign in to confirm you’re not a bot')) {
+            userMessage = 'YouTube Bot Protection: Add YOUTUBE_COOKIES_TEXT on Render or cookies.txt to authenticate.';
+        } else if (rawErr.includes('Video unavailable')) {
+            userMessage = 'This video is private, removed, or region-restricted.';
+        }
+        res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
 });
 
@@ -142,13 +141,19 @@ app.get('/clip', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Clip generation error:', error);
+        console.error('Clip generation error details:', error.stderr || error.message || error);
         cleanupFile(outputPath);
-        res.status(500).json({ error: 'Error generating clip. Please ensure timestamps exist inside video duration.' });
+        
+        const rawErr = String(error.stderr || error.message || '');
+        let userMessage = 'Error generating clip.';
+        if (rawErr.includes('Sign in to confirm you’re not a bot')) {
+            userMessage = 'YouTube Bot Protection: Add YOUTUBE_COOKIES_TEXT on Render or cookies.txt to authenticate.';
+        }
+        res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
 });
 
-// Batch Queue Process endpoint (Processes multiple links fast)
+// Batch Queue Process endpoint
 app.post('/api/batch', async (req, res) => {
     try {
         const { urls, format = 'mp4', quality = 'best' } = req.body;
@@ -156,11 +161,9 @@ app.post('/api/batch', async (req, res) => {
             return res.status(400).json({ error: 'Please provide an array of URLs' });
         }
 
-        // Limit batch to max 20 per request to protect server resources
         const validUrls = urls.map(u => u.trim()).filter(Boolean).slice(0, 20);
         console.log(`[Batch Processing] Received ${validUrls.length} URLs`);
 
-        // Fast metadata inspection for each
         const results = await Promise.all(validUrls.map(async (u, idx) => {
             try {
                 const info = await youtubedl(u, {
