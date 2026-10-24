@@ -16,27 +16,24 @@ if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
-// Clean YouTube URLs: convert shorts/youtu.be to standard watch URLs and remove tracking params
-function normalizeYouTubeUrl(rawUrl) {
-    try {
-        let u = rawUrl.trim();
-        // Extract video ID from shorts or youtu.be
-        const shortsMatch = u.match(/(?:shorts\/|youtu\.be\/|v\/|watch\?v=)([\w-]{11})/);
-        if (shortsMatch && shortsMatch[1]) {
-            return `https://www.youtube.com/watch?v=${shortsMatch[1]}`;
-        }
-        return u;
-    } catch {
-        return rawUrl;
+// Clean and extract standard YouTube URL
+function cleanYouTubeUrl(rawUrl) {
+    if (!rawUrl) return '';
+    let u = rawUrl.trim();
+    // Match 11-char video id from shorts, watch, or youtu.be
+    const match = u.match(/(?:shorts\/|youtu\.be\/|v\/|watch\?v=)([\w-]{11})/);
+    if (match && match[1]) {
+        return `https://www.youtube.com/watch?v=${match[1]}`;
     }
+    return u;
 }
 
-// Base options: Uses iOS/Android client extraction which completely bypasses YouTube's bot sign-in prompt
+// Android client extraction completely circumvents web bot detection & PO token challenges
 function getBaseOptions() {
     return {
         ffmpegLocation: ffmpegPath,
         noWarnings: true,
-        extractorArgs: 'youtube:player_client=ios,android'
+        extractorArgs: 'youtube:player_client=android'
     };
 }
 
@@ -52,7 +49,7 @@ app.get('/download', async (req, res) => {
         let { url, quality = 'best', format = 'mp4' } = req.query;
         if (!url) return res.status(400).json({ error: 'Missing video URL' });
 
-        const targetUrl = normalizeYouTubeUrl(url);
+        const targetUrl = cleanYouTubeUrl(url);
         console.log(`[Single Download] Processing: ${targetUrl} (Format: ${format}, Quality: ${quality})`);
 
         const isAudio = format === 'mp3';
@@ -95,9 +92,9 @@ app.get('/download', async (req, res) => {
         const rawErr = String(error.stderr || error.message || '');
         let userMessage = 'Error downloading video.';
         if (rawErr.includes('This video is unavailable')) {
-            userMessage = 'This video is unavailable or restricted by YouTube.';
-        } else if (rawErr.includes('Private video')) {
-            userMessage = 'This video is private.';
+            userMessage = 'This specific video is unavailable, deleted, or region-restricted.';
+        } else if (rawErr.includes('Sign in to confirm')) {
+            userMessage = 'YouTube Bot Protection triggered. Please retry in a few moments.';
         }
         res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
@@ -112,7 +109,7 @@ app.get('/clip', async (req, res) => {
             return res.status(400).json({ error: 'Missing required parameters: url, start, end' });
         }
 
-        const targetUrl = normalizeYouTubeUrl(url);
+        const targetUrl = cleanYouTubeUrl(url);
         console.log(`[Clip Extractor] Processing: ${targetUrl} (${start} to ${end})`);
 
         const filename = `clip-${Date.now()}.mp4`;
@@ -155,7 +152,7 @@ app.post('/api/batch', async (req, res) => {
 
         const results = await Promise.all(validUrls.map(async (u, idx) => {
             try {
-                const targetUrl = normalizeYouTubeUrl(u);
+                const targetUrl = cleanYouTubeUrl(u);
                 const info = await youtubedl(targetUrl, {
                     ...getBaseOptions(),
                     dumpSingleJson: true,
