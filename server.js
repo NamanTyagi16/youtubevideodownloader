@@ -16,24 +16,25 @@ if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
-// Clean and extract standard YouTube URL
+// Clean and format any YouTube URL (handles shorts, youtu.be, mobile links)
 function cleanYouTubeUrl(rawUrl) {
     if (!rawUrl) return '';
     let u = rawUrl.trim();
-    // Match 11-char video id from shorts, watch, or youtu.be
-    const match = u.match(/(?:shorts\/|youtu\.be\/|v\/|watch\?v=)([\w-]{11})/);
+    // Normalize shorts, youtu.be, embed, or standard watch urls
+    const match = u.match(/(?:shorts\/|youtu\.be\/|embed\/|v\/|watch\?v=)([\w-]{11})/i);
     if (match && match[1]) {
         return `https://www.youtube.com/watch?v=${match[1]}`;
     }
     return u;
 }
 
-// Android client extraction completely circumvents web bot detection & PO token challenges
+// Global robust yt-dlp configuration
+// Using android_embedded bypasses YouTube's bot wall, signature checks, and SABR/PO token errors completely
 function getBaseOptions() {
     return {
         ffmpegLocation: ffmpegPath,
         noWarnings: true,
-        extractorArgs: 'youtube:player_client=android'
+        extractorArgs: 'youtube:player_client=android_embedded'
     };
 }
 
@@ -50,7 +51,7 @@ app.get('/download', async (req, res) => {
         if (!url) return res.status(400).json({ error: 'Missing video URL' });
 
         const targetUrl = cleanYouTubeUrl(url);
-        console.log(`[Single Download] Processing: ${targetUrl} (Format: ${format}, Quality: ${quality})`);
+        console.log(`[Single Download] Starting: ${targetUrl} (Format: ${format}, Quality: ${quality})`);
 
         const isAudio = format === 'mp3';
         const fileExt = isAudio ? 'mp3' : 'mp4';
@@ -80,9 +81,15 @@ app.get('/download', async (req, res) => {
 
         await youtubedl(targetUrl, dlOptions);
 
-        res.download(outputPath, `video-${Date.now()}.${fileExt}`, (err) => {
+        // Find the generated file (handles cases where yt-dlp adds extension)
+        const finalFile = resolveActualFile(outputPath);
+        if (!finalFile) {
+            throw new Error('Downloaded file could not be located.');
+        }
+
+        res.download(finalFile, `video-${Date.now()}.${fileExt}`, (err) => {
             if (err) console.error('Error sending file:', err);
-            cleanupFile(outputPath);
+            cleanupFile(finalFile);
         });
 
     } catch (error) {
@@ -92,9 +99,7 @@ app.get('/download', async (req, res) => {
         const rawErr = String(error.stderr || error.message || '');
         let userMessage = 'Error downloading video.';
         if (rawErr.includes('This video is unavailable')) {
-            userMessage = 'This specific video is unavailable, deleted, or region-restricted.';
-        } else if (rawErr.includes('Sign in to confirm')) {
-            userMessage = 'YouTube Bot Protection triggered. Please retry in a few moments.';
+            userMessage = 'This video is unavailable, deleted, or restricted.';
         }
         res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
@@ -110,7 +115,7 @@ app.get('/clip', async (req, res) => {
         }
 
         const targetUrl = cleanYouTubeUrl(url);
-        console.log(`[Clip Extractor] Processing: ${targetUrl} (${start} to ${end})`);
+        console.log(`[Clip Extractor] Starting: ${targetUrl} (${start} to ${end})`);
 
         const filename = `clip-${Date.now()}.mp4`;
         outputPath = path.resolve(downloadsDir, filename);
@@ -127,9 +132,14 @@ app.get('/clip', async (req, res) => {
 
         await youtubedl(targetUrl, dlOptions);
 
-        res.download(outputPath, `clip-${Date.now()}.mp4`, (err) => {
+        const finalFile = resolveActualFile(outputPath);
+        if (!finalFile) {
+            throw new Error('Generated clip could not be located.');
+        }
+
+        res.download(finalFile, `clip-${Date.now()}.mp4`, (err) => {
             if (err) console.error('Error sending clip:', err);
-            cleanupFile(outputPath);
+            cleanupFile(finalFile);
         });
 
     } catch (error) {
@@ -186,6 +196,20 @@ app.post('/api/batch', async (req, res) => {
         res.status(500).json({ error: 'Batch processing failed' });
     }
 });
+
+// Helper to resolve exact file path when yt-dlp appends or modifies extensions
+function resolveActualFile(basePath) {
+    if (fs.existsSync(basePath)) return basePath;
+    const dir = path.dirname(basePath);
+    const baseName = path.basename(basePath);
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+        if (file.startsWith(baseName.replace(/\.[^/.]+$/, ''))) {
+            return path.join(dir, file);
+        }
+    }
+    return null;
+}
 
 // Safe cleanup utility
 function cleanupFile(filePath) {
