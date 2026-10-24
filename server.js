@@ -16,11 +16,10 @@ if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
-// Clean and format any YouTube URL (handles shorts, youtu.be, mobile links)
+// Clean and extract standard YouTube URL
 function cleanYouTubeUrl(rawUrl) {
     if (!rawUrl) return '';
     let u = rawUrl.trim();
-    // Normalize shorts, youtu.be, embed, or standard watch urls
     const match = u.match(/(?:shorts\/|youtu\.be\/|embed\/|v\/|watch\?v=)([\w-]{11})/i);
     if (match && match[1]) {
         return `https://www.youtube.com/watch?v=${match[1]}`;
@@ -28,13 +27,12 @@ function cleanYouTubeUrl(rawUrl) {
     return u;
 }
 
-// Global robust yt-dlp configuration
-// Using android_embedded bypasses YouTube's bot wall, signature checks, and SABR/PO token errors completely
+// Uses tv_embedded client which has 0 bot verification or cookie walls on cloud servers
 function getBaseOptions() {
     return {
         ffmpegLocation: ffmpegPath,
         noWarnings: true,
-        extractorArgs: 'youtube:player_client=android_embedded'
+        extractorArgs: 'youtube:player_client=tv_embedded'
     };
 }
 
@@ -81,7 +79,6 @@ app.get('/download', async (req, res) => {
 
         await youtubedl(targetUrl, dlOptions);
 
-        // Find the generated file (handles cases where yt-dlp adds extension)
         const finalFile = resolveActualFile(outputPath);
         if (!finalFile) {
             throw new Error('Downloaded file could not be located.');
