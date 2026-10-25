@@ -26,25 +26,31 @@ function initCookies() {
     const ssid = process.env.YT_SSID;
     const apisid = process.env.YT_APISID;
     const sapisid = process.env.YT_SAPISID;
+    const secure1psid = process.env.YT_SECURE_1PSID;
+    const secure3psid = process.env.YT_SECURE_3PSID;
+    const loginInfo = process.env.YT_LOGIN_INFO;
 
     if (rawCookies) {
         fs.writeFileSync(cookiesPath, rawCookies, 'utf8');
-        console.log('[Auth] Successfully loaded cookies from YOUTUBE_COOKIES_TEXT environment variable.');
-    } else if (sid) {
+        console.log('[Auth] Successfully loaded cookies from YOUTUBE_COOKIES_TEXT.');
+    } else if (secure1psid || sid || loginInfo) {
         // Construct standard Netscape cookie format for YouTube
         let content = '# Netscape HTTP Cookie File\n';
-        content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\t${sid}\n`;
+        if (sid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\t${sid}\n`;
         if (hsid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tHSID\t${hsid}\n`;
         if (ssid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSSID\t${ssid}\n`;
         if (apisid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tAPISID\t${apisid}\n`;
         if (sapisid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\t${sapisid}\n`;
+        if (secure1psid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\t__Secure-1PSID\t${secure1psid}\n`;
+        if (secure3psid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\t__Secure-3PSID\t${secure3psid}\n`;
+        if (loginInfo) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\t${loginInfo}\n`;
         
         fs.writeFileSync(cookiesPath, content, 'utf8');
-        console.log('[Auth] Successfully constructed cookies.txt from YT_SID/YT_HSID environment variables.');
+        console.log('[Auth] Successfully constructed cookies.txt from environment variables.');
     } else if (fs.existsSync(cookiesPath)) {
         console.log('[Auth] Found existing cookies.txt file.');
     } else {
-        console.log('[Auth] No cookies provided. Will run in unauthenticated mode.');
+        console.log('[Auth] No cookies provided. Running unauthenticated.');
     }
 }
 
@@ -143,7 +149,7 @@ app.get('/download', async (req, res) => {
         if (rawErr.includes('This video is unavailable')) {
             userMessage = 'This video is unavailable, deleted, or restricted.';
         } else if (rawErr.includes('Sign in to confirm')) {
-            userMessage = 'Authentication required: Add YT_SID & YT_HSID in Render Environment Variables.';
+            userMessage = 'Authentication required: Add YT_SECURE_1PSID & YT_LOGIN_INFO in Render Environment Variables.';
         }
         res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
