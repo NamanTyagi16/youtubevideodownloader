@@ -16,6 +16,40 @@ if (!fs.existsSync(downloadsDir)) {
     fs.mkdirSync(downloadsDir, { recursive: true });
 }
 
+const cookiesPath = path.resolve(__dirname, 'cookies.txt');
+
+// Automatically construct cookies.txt from environment variables if provided
+function initCookies() {
+    const rawCookies = process.env.YOUTUBE_COOKIES_TEXT;
+    const sid = process.env.YT_SID;
+    const hsid = process.env.YT_HSID;
+    const ssid = process.env.YT_SSID;
+    const apisid = process.env.YT_APISID;
+    const sapisid = process.env.YT_SAPISID;
+
+    if (rawCookies) {
+        fs.writeFileSync(cookiesPath, rawCookies, 'utf8');
+        console.log('[Auth] Successfully loaded cookies from YOUTUBE_COOKIES_TEXT environment variable.');
+    } else if (sid) {
+        // Construct standard Netscape cookie format for YouTube
+        let content = '# Netscape HTTP Cookie File\n';
+        content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\t${sid}\n`;
+        if (hsid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tHSID\t${hsid}\n`;
+        if (ssid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSSID\t${ssid}\n`;
+        if (apisid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tAPISID\t${apisid}\n`;
+        if (sapisid) content += `.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\t${sapisid}\n`;
+        
+        fs.writeFileSync(cookiesPath, content, 'utf8');
+        console.log('[Auth] Successfully constructed cookies.txt from YT_SID/YT_HSID environment variables.');
+    } else if (fs.existsSync(cookiesPath)) {
+        console.log('[Auth] Found existing cookies.txt file.');
+    } else {
+        console.log('[Auth] No cookies provided. Will run in unauthenticated mode.');
+    }
+}
+
+initCookies();
+
 // Clean and extract standard YouTube URL
 function cleanYouTubeUrl(rawUrl) {
     if (!rawUrl) return '';
@@ -27,18 +61,29 @@ function cleanYouTubeUrl(rawUrl) {
     return u;
 }
 
-// The mediaconnect client does not trigger YouTube's datacenter bot challenge or require cookies
+// Global robust yt-dlp configuration with cookie authentication
 function getBaseOptions() {
-    return {
+    const opts = {
         ffmpegLocation: ffmpegPath,
-        noWarnings: true,
-        extractorArgs: 'youtube:player_client=mediaconnect'
+        noWarnings: true
     };
+
+    if (fs.existsSync(cookiesPath)) {
+        opts.cookies = cookiesPath;
+    } else if (process.platform === 'win32') {
+        opts.cookiesFromBrowser = 'chrome';
+    }
+
+    return opts;
 }
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', message: 'CreatorScope Engine is running!' });
+    res.json({
+        status: 'ok',
+        authenticated: fs.existsSync(cookiesPath),
+        message: 'CreatorScope Engine is running!'
+    });
 });
 
 // Single Video Download endpoint
@@ -97,6 +142,8 @@ app.get('/download', async (req, res) => {
         let userMessage = 'Error downloading video.';
         if (rawErr.includes('This video is unavailable')) {
             userMessage = 'This video is unavailable, deleted, or restricted.';
+        } else if (rawErr.includes('Sign in to confirm')) {
+            userMessage = 'Authentication required: Add YT_SID & YT_HSID in Render Environment Variables.';
         }
         res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
