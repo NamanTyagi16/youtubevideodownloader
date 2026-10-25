@@ -72,30 +72,7 @@ function cleanYouTubeUrl(rawUrl) {
     return u;
 }
 
-// Robust fallback downloader that handles both standard videos and Shorts
-async function executeDownload(targetUrl, baseOptions) {
-    const clientsToTry = [
-        undefined, // Default client with cookies
-        'android_embedded', // Bypasses Shorts restrictions
-        'tv_embedded' // Secondary fallback
-    ];
-
-    let lastError = null;
-    for (const client of clientsToTry) {
-        try {
-            const options = { ...baseOptions };
-            if (client) {
-                options.extractorArgs = `youtube:player_client=${client}`;
-            }
-            return await youtubedl(targetUrl, options);
-        } catch (err) {
-            lastError = err;
-            console.log(`[Engine] Client attempt (${client || 'default'}) failed, trying next fallback...`);
-        }
-    }
-    throw lastError;
-}
-
+// Global base options
 function getBaseOptions() {
     const opts = {
         ffmpegLocation: ffmpegPath,
@@ -109,6 +86,30 @@ function getBaseOptions() {
     }
 
     return opts;
+}
+
+// Download executor: Uses android_embedded client first (bypasses bot challenge on datacenter IPs without cookies)
+async function executeDownload(targetUrl, baseOptions) {
+    // Pipeline order: android_embedded first (most effective on cloud IPs), then default cookies, then tv_embedded
+    const clientsToTry = ['android_embedded', undefined, 'tv_embedded'];
+
+    let lastError = null;
+    for (const client of clientsToTry) {
+        try {
+            const options = { ...baseOptions };
+            if (client) {
+                options.extractorArgs = `youtube:player_client=${client}`;
+                // When using android_embedded, remove cookies parameter to avoid cookie-device mismatch challenge
+                delete options.cookies;
+            }
+            console.log(`[Engine] Attempting download using client: ${client || 'cookies'}`);
+            return await youtubedl(targetUrl, options);
+        } catch (err) {
+            lastError = err;
+            console.warn(`[Engine] Client (${client || 'cookies'}) failed: ${err.message || err}. Trying next fallback...`);
+        }
+    }
+    throw lastError;
 }
 
 // Health check endpoint
@@ -156,7 +157,6 @@ app.get('/download', async (req, res) => {
             dlOptions.mergeOutputFormat = 'mp4';
         }
 
-        // Uses our robust multi-client download executor
         await executeDownload(targetUrl, dlOptions);
 
         const finalFile = resolveActualFile(outputPath);
@@ -178,7 +178,7 @@ app.get('/download', async (req, res) => {
         if (rawErr.includes('This video is unavailable')) {
             userMessage = 'This video is unavailable, deleted, or restricted.';
         } else if (rawErr.includes('Sign in to confirm')) {
-            userMessage = 'YouTube Bot Protection triggered: Please check that your Render Environment Variables (YT_SECURE_1PSID and YT_LOGIN_INFO) are set and valid.';
+            userMessage = 'YouTube Bot Protection triggered: Please check that your Render Environment Variables are set and valid.';
         }
         res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
     }
