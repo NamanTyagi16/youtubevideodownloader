@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const youtubedl = require('youtube-dl-exec');
 const ffmpegPath = require('ffmpeg-static');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -30,7 +31,6 @@ function initCookies() {
 
     if (rawCookies) {
         fs.writeFileSync(cookiesPath, rawCookies, 'utf8');
-        console.log('[Auth] Loaded raw cookies from YOUTUBE_COOKIES_TEXT.');
         return true;
     } 
     
@@ -51,12 +51,9 @@ function initCookies() {
 
     if (lines.length > 1) {
         fs.writeFileSync(cookiesPath, lines.join('\n') + '\n', 'utf8');
-        console.log(`[Auth] Constructed cookies.txt with ${lines.length - 1} entries.`);
-        return true;
-    } else if (fs.existsSync(cookiesPath)) {
         return true;
     }
-    return false;
+    return fs.existsSync(cookiesPath);
 }
 
 initCookies();
@@ -72,7 +69,6 @@ function cleanYouTubeUrl(rawUrl) {
     return u;
 }
 
-// Global base options
 function getBaseOptions() {
     const opts = {
         ffmpegLocation: ffmpegPath,
@@ -88,28 +84,74 @@ function getBaseOptions() {
     return opts;
 }
 
-// Download executor: Uses android_embedded client first (bypasses bot challenge on datacenter IPs without cookies)
-async function executeDownload(targetUrl, baseOptions) {
-    // Pipeline order: android_embedded first (most effective on cloud IPs), then default cookies, then tv_embedded
-    const clientsToTry = ['android_embedded', undefined, 'tv_embedded'];
+// Universal Stream Downloader / Slicer via FFmpeg
+// This extracts stream URLs directly and streams via FFmpeg, completely bypassing yt-dlp download blocks
+async function streamProcessVideo(targetUrl, outputPath, options = {}) {
+    const { start, end, isAudio = false, quality = 'best' } = options;
 
-    let lastError = null;
-    for (const client of clientsToTry) {
-        try {
-            const options = { ...baseOptions };
-            if (client) {
-                options.extractorArgs = `youtube:player_client=${client}`;
-                // When using android_embedded, remove cookies parameter to avoid cookie-device mismatch challenge
-                delete options.cookies;
-            }
-            console.log(`[Engine] Attempting download using client: ${client || 'cookies'}`);
-            return await youtubedl(targetUrl, options);
-        } catch (err) {
-            lastError = err;
-            console.warn(`[Engine] Client (${client || 'cookies'}) failed: ${err.message || err}. Trying next fallback...`);
+    console.log(`[StreamEngine] Extracting direct video/audio stream URLs for ${targetUrl}...`);
+    const info = await youtubedl(targetUrl, {
+        ...getBaseOptions(),
+        dumpSingleJson: true,
+        skipDownload: true
+    });
+
+    const formats = (info.formats || []).filter(f => f.url && f.url.startsWith('https://') && !f.url.includes('manifest'));
+    if (!formats.length) {
+        throw new Error('No direct stream streams found.');
+    }
+
+    // Audio stream
+    const audioFormat = formats.find(f => f.acodec !== 'none' && f.vcodec === 'none' && (f.ext === 'm4a' || f.ext === 'mp4')) ||
+                        formats.find(f => f.acodec !== 'none' && f.vcodec === 'none') || formats[0];
+
+    // Video stream
+    let videoFormat;
+    if (!isAudio) {
+        const vids = formats.filter(f => f.vcodec !== 'none' && f.ext === 'mp4');
+        if (quality === '720') {
+            videoFormat = vids.find(f => f.height <= 720) || vids[0];
+        } else if (quality === '1080') {
+            videoFormat = vids.find(f => f.height <= 1080) || vids[0];
+        } else {
+            videoFormat = vids[0] || formats.find(f => f.vcodec !== 'none');
         }
     }
-    throw lastError;
+
+    return new Promise((resolve, reject) => {
+        let args = ['-y'];
+
+        if (start) args.push('-ss', start);
+        if (end) args.push('-to', end);
+
+        if (isAudio) {
+            args.push('-i', audioFormat.url, '-vn', '-c:a', 'libmp3lame', '-q:a', '0', outputPath);
+        } else {
+            args.push('-i', videoFormat.url);
+            if (start) args.push('-ss', start);
+            if (end) args.push('-to', end);
+            args.push('-i', audioFormat.url);
+            args.push('-c:v', 'copy', '-c:a', 'aac', outputPath);
+        }
+
+        console.log(`[FFmpeg] Executing stream processing -> ${path.basename(outputPath)}`);
+        const proc = spawn(ffmpegPath, args);
+
+        let errLog = '';
+        proc.stderr.on('data', data => { errLog += data.toString(); });
+
+        proc.on('close', code => {
+            if (code === 0 && fs.existsSync(outputPath)) {
+                console.log(`[FFmpeg] Stream completed successfully -> ${path.basename(outputPath)}`);
+                resolve(outputPath);
+            } else {
+                console.error(`[FFmpeg] Failed (code ${code}):`, errLog.slice(-400));
+                reject(new Error(`FFmpeg stream process failed: ${errLog.slice(-200)}`));
+            }
+        });
+
+        proc.on('error', reject);
+    });
 }
 
 // Health check endpoint
@@ -129,58 +171,25 @@ app.get('/download', async (req, res) => {
         if (!url) return res.status(400).json({ error: 'Missing video URL' });
 
         const targetUrl = cleanYouTubeUrl(url);
-        console.log(`[Single Download] Starting: ${targetUrl} (Format: ${format}, Quality: ${quality})`);
+        console.log(`[Single Download] Processing: ${targetUrl} (Format: ${format}, Quality: ${quality})`);
 
         const isAudio = format === 'mp3';
         const fileExt = isAudio ? 'mp3' : 'mp4';
         const filename = `video-${Date.now()}.${fileExt}`;
         outputPath = path.resolve(downloadsDir, filename);
 
-        const dlOptions = {
-            ...getBaseOptions(),
-            output: outputPath,
-            forceOverwrites: true
-        };
+        // Process directly via FFmpeg stream pipeline
+        await streamProcessVideo(targetUrl, outputPath, { isAudio, quality });
 
-        if (isAudio) {
-            dlOptions.extractAudio = true;
-            dlOptions.audioFormat = 'mp3';
-            dlOptions.audioQuality = 0;
-        } else {
-            if (quality === '1080') {
-                dlOptions.format = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
-            } else if (quality === '720') {
-                dlOptions.format = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best';
-            } else {
-                dlOptions.format = 'bestvideo+bestaudio/best';
-            }
-            dlOptions.mergeOutputFormat = 'mp4';
-        }
-
-        await executeDownload(targetUrl, dlOptions);
-
-        const finalFile = resolveActualFile(outputPath);
-        if (!finalFile) {
-            throw new Error('Downloaded file could not be located.');
-        }
-
-        res.download(finalFile, `video-${Date.now()}.${fileExt}`, (err) => {
+        res.download(outputPath, `video-${Date.now()}.${fileExt}`, (err) => {
             if (err) console.error('Error sending file:', err);
-            cleanupFile(finalFile);
+            cleanupFile(outputPath);
         });
 
     } catch (error) {
-        console.error('Download error details:', error.stderr || error.message || error);
+        console.error('Download error details:', error.message || error);
         cleanupFile(outputPath);
-        
-        const rawErr = String(error.stderr || error.message || '');
-        let userMessage = 'Error downloading video.';
-        if (rawErr.includes('This video is unavailable')) {
-            userMessage = 'This video is unavailable, deleted, or restricted.';
-        } else if (rawErr.includes('Sign in to confirm')) {
-            userMessage = 'YouTube Bot Protection triggered: Please check that your Render Environment Variables are set and valid.';
-        }
-        res.status(500).json({ error: userMessage, details: rawErr.slice(0, 300) });
+        res.status(500).json({ error: 'Error downloading video.', details: String(error.message || '').slice(0, 300) });
     }
 });
 
@@ -194,37 +203,23 @@ app.get('/clip', async (req, res) => {
         }
 
         const targetUrl = cleanYouTubeUrl(url);
-        console.log(`[Clip Extractor] Starting: ${targetUrl} (${start} to ${end})`);
+        console.log(`[Clip Extractor] Processing: ${targetUrl} (${start} to ${end})`);
 
         const filename = `clip-${Date.now()}.mp4`;
         outputPath = path.resolve(downloadsDir, filename);
 
-        const dlOptions = {
-            ...getBaseOptions(),
-            downloadSections: `*${start}-${end}`,
-            format: 'bestvideo+bestaudio/best',
-            mergeOutputFormat: 'mp4',
-            forceKeyframesAtCuts: true,
-            output: outputPath,
-            forceOverwrites: true
-        };
+        // Slices stream directly at the network level in seconds
+        await streamProcessVideo(targetUrl, outputPath, { start, end, isAudio: false });
 
-        await executeDownload(targetUrl, dlOptions);
-
-        const finalFile = resolveActualFile(outputPath);
-        if (!finalFile) {
-            throw new Error('Generated clip could not be located.');
-        }
-
-        res.download(finalFile, `clip-${Date.now()}.mp4`, (err) => {
+        res.download(outputPath, `clip-${Date.now()}.mp4`, (err) => {
             if (err) console.error('Error sending clip:', err);
-            cleanupFile(finalFile);
+            cleanupFile(outputPath);
         });
 
     } catch (error) {
-        console.error('Clip generation error details:', error.stderr || error.message || error);
+        console.error('Clip generation error details:', error.message || error);
         cleanupFile(outputPath);
-        res.status(500).json({ error: 'Error generating clip. Please ensure timestamps exist inside video duration.', details: String(error.stderr || error.message || '').slice(0, 300) });
+        res.status(500).json({ error: 'Error generating clip. Please ensure timestamps exist inside video duration.', details: String(error.message || '').slice(0, 300) });
     }
 });
 
@@ -275,20 +270,6 @@ app.post('/api/batch', async (req, res) => {
         res.status(500).json({ error: 'Batch processing failed' });
     }
 });
-
-// Helper to resolve exact file path when yt-dlp appends or modifies extensions
-function resolveActualFile(basePath) {
-    if (fs.existsSync(basePath)) return basePath;
-    const dir = path.dirname(basePath);
-    const baseName = path.basename(basePath);
-    const files = fs.readdirSync(dir);
-    for (const file of files) {
-        if (file.startsWith(baseName.replace(/\.[^/.]+$/, ''))) {
-            return path.join(dir, file);
-        }
-    }
-    return null;
-}
 
 // Safe cleanup utility
 function cleanupFile(filePath) {
