@@ -34,7 +34,6 @@ function initCookies() {
         return true;
     } 
     
-    // Construct valid Netscape cookie file
     let lines = ['# Netscape HTTP Cookie File'];
     const addCookie = (name, val) => {
         if (!val) return;
@@ -60,7 +59,7 @@ function initCookies() {
     return false;
 }
 
-const hasCookies = initCookies();
+initCookies();
 
 // Clean and extract standard YouTube URL
 function cleanYouTubeUrl(rawUrl) {
@@ -71,6 +70,30 @@ function cleanYouTubeUrl(rawUrl) {
         return `https://www.youtube.com/watch?v=${match[1]}`;
     }
     return u;
+}
+
+// Robust fallback downloader that handles both standard videos and Shorts
+async function executeDownload(targetUrl, baseOptions) {
+    const clientsToTry = [
+        undefined, // Default client with cookies
+        'android_embedded', // Bypasses Shorts restrictions
+        'tv_embedded' // Secondary fallback
+    ];
+
+    let lastError = null;
+    for (const client of clientsToTry) {
+        try {
+            const options = { ...baseOptions };
+            if (client) {
+                options.extractorArgs = `youtube:player_client=${client}`;
+            }
+            return await youtubedl(targetUrl, options);
+        } catch (err) {
+            lastError = err;
+            console.log(`[Engine] Client attempt (${client || 'default'}) failed, trying next fallback...`);
+        }
+    }
+    throw lastError;
 }
 
 function getBaseOptions() {
@@ -133,7 +156,8 @@ app.get('/download', async (req, res) => {
             dlOptions.mergeOutputFormat = 'mp4';
         }
 
-        await youtubedl(targetUrl, dlOptions);
+        // Uses our robust multi-client download executor
+        await executeDownload(targetUrl, dlOptions);
 
         const finalFile = resolveActualFile(outputPath);
         if (!finalFile) {
@@ -185,7 +209,7 @@ app.get('/clip', async (req, res) => {
             forceOverwrites: true
         };
 
-        await youtubedl(targetUrl, dlOptions);
+        await executeDownload(targetUrl, dlOptions);
 
         const finalFile = resolveActualFile(outputPath);
         if (!finalFile) {
